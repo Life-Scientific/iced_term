@@ -384,10 +384,11 @@ impl<'a> TerminalView<'a> {
                 }
             },
             BindingAction::Copy => {
-                clipboard.write(
-                    ClipboardKind::Standard,
-                    self.term.backend.selectable_content(),
-                );
+                // With nothing selected, the clipboard keeps what it had.
+                let content = self.term.backend.selectable_content();
+                if !content.is_empty() {
+                    clipboard.write(ClipboardKind::Standard, content);
+                }
             },
             _ => {},
         };
