@@ -5,7 +5,9 @@ use alacritty_terminal::event::{
 };
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
+use alacritty_terminal::index::{
+    Boundary, Column, Direction, Line, Point, Side,
+};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
@@ -22,7 +24,7 @@ use std::ops::{Index, RangeInclusive};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`]+"#;
+const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}\u{2500}-\u{259F}<>"\s{-}\^⟨⟩`]+"#;
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -137,6 +139,7 @@ pub struct Backend {
     notifier: Notifier,
     last_content: RenderableContent,
     pub(crate) url_regex: RegexSearch,
+    hovered_uri: Option<String>,
 }
 
 impl Backend {
@@ -186,6 +189,7 @@ impl Backend {
             notifier,
             last_content: initial_content,
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
+            hovered_uri: None,
         })
     }
 
@@ -243,14 +247,25 @@ impl Backend {
     ) {
         match link_action {
             LinkAction::Hover => {
-                self.last_content.hovered_hyperlink = self.regex_match_at(
-                    terminal,
-                    point,
-                    &mut self.url_regex.clone(),
-                );
+                let (range, uri) = match hyperlink_at(terminal, point) {
+                    Some((range, uri)) => (Some(range), Some(uri)),
+                    None => {
+                        let range = self
+                            .regex_match_at(
+                                terminal,
+                                point,
+                                &mut self.url_regex.clone(),
+                            )
+                            .and_then(|range| trim_url(terminal, range));
+                        (range, None)
+                    },
+                };
+                self.last_content.hovered_hyperlink = range;
+                self.hovered_uri = uri;
             },
             LinkAction::Clear => {
                 self.last_content.hovered_hyperlink = None;
+                self.hovered_uri = None;
             },
             LinkAction::Open => {
                 self.open_link();
@@ -259,7 +274,9 @@ impl Backend {
     }
 
     fn open_link(&self) {
-        if let Some(range) = &self.last_content.hovered_hyperlink {
+        if let Some(uri) = &self.hovered_uri {
+            let _ = open::that(uri);
+        } else if let Some(range) = &self.last_content.hovered_hyperlink {
             let start = range.start();
             let end = range.end();
 
@@ -541,6 +558,65 @@ impl Backend {
     }
 }
 
+/// The run of cells around `point` that an OSC 8 escape made one link, and
+/// its target, which is what the program meant whatever the text shows.
+fn hyperlink_at(
+    term: &Term<EventProxy>,
+    point: Point,
+) -> Option<(RangeInclusive<Point>, String)> {
+    let grid = term.grid();
+    let link = grid.index(point).hyperlink()?;
+    let same = |p: Point| grid.index(p).hyperlink().as_ref() == Some(&link);
+    let (mut start, mut end) = (point, point);
+    for _ in 0..4096 {
+        let before = start.sub(grid, Boundary::Grid, 1);
+        if before == start || !same(before) {
+            break;
+        }
+        start = before;
+    }
+    for _ in 0..4096 {
+        let after = end.add(grid, Boundary::Grid, 1);
+        if after == end || !same(after) {
+            break;
+        }
+        end = after;
+    }
+    Some((start..=end, link.uri().to_string()))
+}
+
+/// A plain-text URL without what usually follows one in prose: closing
+/// punctuation, and a bracket or quote that the URL did not open.
+fn trim_url(term: &Term<EventProxy>, range: Match) -> Option<Match> {
+    let grid = term.grid();
+    let (start, mut end) = (*range.start(), *range.end());
+    let mut text = String::new();
+    let mut point = start;
+    loop {
+        text.push(grid.index(point).c);
+        if point == end {
+            break;
+        }
+        point = point.add(grid, Boundary::Grid, 1);
+    }
+    let count = |text: &str, c: char| text.chars().filter(|&x| x == c).count();
+    while let Some(last) = text.chars().last() {
+        let unopened = match last {
+            ')' => count(&text, ')') > count(&text, '('),
+            ']' => count(&text, ']') > count(&text, '['),
+            '}' => count(&text, '}') > count(&text, '{'),
+            '\'' | '"' => true,
+            _ => ".,;:!?".contains(last),
+        };
+        if !unopened || start == end {
+            break;
+        }
+        text.pop();
+        end = end.sub(grid, Boundary::Grid, 1);
+    }
+    Some(start..=end)
+}
+
 /// Copied from alacritty/src/display/hint.rs:
 /// Iterate over all visible regex matches.
 fn visible_regex_match_iter<'a>(
@@ -594,5 +670,59 @@ pub struct EventProxy(mpsc::UnboundedSender<Event>);
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         let _ = self.0.send(event);
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use alacritty_terminal::term::test::TermSize;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn term(bytes: &[u8]) -> Term<EventProxy> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut term = Term::new(
+            term::Config::default(),
+            &TermSize::new(80, 5),
+            EventProxy(tx),
+        );
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, bytes);
+        term
+    }
+
+    fn url(term: &Term<EventProxy>, column: usize) -> String {
+        let point = Point::new(Line(0), Column(column));
+        if let Some((_, uri)) = hyperlink_at(term, point) {
+            return uri;
+        }
+        let mut regex = RegexSearch::new(URL_REGEX).unwrap();
+        let range = visible_regex_match_iter(term, &mut regex)
+            .find(|m| m.contains(&point))
+            .and_then(|m| trim_url(term, m))
+            .unwrap();
+        let mut text = String::new();
+        let mut p = *range.start();
+        loop {
+            text.push(term.grid().index(p).c);
+            if p == *range.end() {
+                return text;
+            }
+            p = p.add(term.grid(), Boundary::Grid, 1);
+        }
+    }
+
+    #[test]
+    fn plain_urls_lose_trailing_punctuation() {
+        assert_eq!(url(&term(b"see (https://a.dev/x)."), 10), "https://a.dev/x");
+        assert_eq!(url(&term(b"https://w.org/A_(b), ok"), 3), "https://w.org/A_(b)");
+        assert_eq!(url(&term("https://a.dev/pr/9\u{2502}".as_bytes()), 3), "https://a.dev/pr/9");
+        assert_eq!(url(&term(b"'https://a.dev/q?x=1'"), 4), "https://a.dev/q?x=1");
+    }
+
+    #[test]
+    fn osc8_links_open_their_target() {
+        let t = term(b"go \x1b]8;;https://github.com/o/r/pull/12\x1b\\#12\x1b]8;;\x1b\\.");
+        assert_eq!(url(&t, 4), "https://github.com/o/r/pull/12");
     }
 }
