@@ -128,7 +128,7 @@ impl<'a> TerminalView<'a> {
                     &mut commands,
                 );
             },
-            iced_core::mouse::Event::CursorMoved { position } => {
+            iced_core::mouse::Event::CursorMoved { .. } => {
                 if !state.is_focused() {
                     return Vec::default();
                 }
@@ -136,7 +136,7 @@ impl<'a> TerminalView<'a> {
                 Self::handle_cursor_moved(
                     state,
                     self.term.backend.renderable_content(),
-                    position,
+                    &cursor_position,
                     layout_position,
                     &mut commands,
                 );
