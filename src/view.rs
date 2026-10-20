@@ -482,6 +482,7 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
 
             let mut last_line: Option<i32> = None;
             let mut bg_batch_rect = BackgroundRect::default();
+            let mut cursor_at = None;
 
             for indexed in content.grid.display_iter() {
                 // Compute per-cell geometry cheaply
@@ -590,15 +591,12 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                     );
                 }
 
-                // Handle cursor rendering
+                // Paint the cursor after the backgrounds, whose runs are
+                // flushed later and would otherwise cover it
                 if content.grid.cursor.point == indexed.point
                     && content.terminal_mode.contains(TermMode::SHOW_CURSOR)
                 {
-                    let cursor_color =
-                        self.term.theme.get_color(content.cursor.fg);
-                    let cursor_rect =
-                        Path::rectangle(Point::new(x, y), cell_size);
-                    frame.fill(&cursor_rect, cursor_color);
+                    cursor_at = Some(Point::new(x, y));
                 }
 
                 // Draw text
@@ -647,6 +645,13 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                 frame.fill(
                     &bg_batch_rect.build(last_line.unwrap_or(0)),
                     bg_batch_rect.color,
+                );
+            }
+
+            if let Some(at) = cursor_at {
+                frame.fill(
+                    &Path::rectangle(at, cell_size),
+                    self.term.theme.get_color(content.cursor.fg),
                 );
             }
         });
