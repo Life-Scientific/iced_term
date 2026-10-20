@@ -461,7 +461,12 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
         let layout_offset_x = layout.position().x;
         let layout_offset_y = layout.position().y;
 
-        let geom = self.term.cache.draw(renderer, viewport.size(), |frame| {
+        // The cells are drawn where the widget is in the window, so the frame
+        // reaches its far corner. The viewport's size alone clipped all of a
+        // terminal below or beside it, as in a scrollable.
+        let bounds = layout.bounds();
+        let size = Size::new(bounds.x + bounds.width, bounds.y + bounds.height);
+        let geom = self.term.cache.draw(renderer, size, |frame| {
             // Precompute constants used in the inner loop
             let display_offset = content.grid.display_offset() as f32;
             let cell_size = Size::new(cell_width, cell_height);
