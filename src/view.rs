@@ -692,7 +692,13 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
             _ => Vec::new(),
         };
 
-        if !commands.is_empty() {
+        // A wheel stays uncaptured, so a scrollable around the terminal
+        // scrolls too: it skips an event its content captured.
+        let wheel = matches!(
+            event,
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. })
+        );
+        if !commands.is_empty() && !wheel {
             shell.capture_event();
         }
 
