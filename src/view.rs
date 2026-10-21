@@ -158,6 +158,7 @@ impl<'a> TerminalView<'a> {
             iced::mouse::Event::WheelScrolled { delta } => {
                 Self::handle_wheel_scrolled(
                     state,
+                    &terminal_mode,
                     *delta,
                     &self.term.font.measure,
                     &mut commands,
@@ -287,6 +288,7 @@ impl<'a> TerminalView<'a> {
 
     fn handle_wheel_scrolled(
         state: &mut TerminalViewState,
+        terminal_mode: &TermMode,
         delta: ScrollDelta,
         font_measure: &Size<f32>,
         commands: &mut Vec<Command>,
@@ -305,6 +307,25 @@ impl<'a> TerminalView<'a> {
                     commands.push(Command::Scroll(lines as i32));
                 }
             },
+        }
+
+        // A program that reads the mouse gets the wheel as wheel presses,
+        // as alacritty sends them, not as arrow keys or a scrolled view.
+        if terminal_mode.intersects(TermMode::MOUSE_MODE) {
+            if let Some(Command::Scroll(lines)) = commands.pop() {
+                commands.extend((0..lines.abs()).map(|_| {
+                    Command::MouseReport(
+                        if lines > 0 {
+                            MouseButton::ScrollUp
+                        } else {
+                            MouseButton::ScrollDown
+                        },
+                        state.keyboard_modifiers,
+                        state.mouse_position_on_grid,
+                        true,
+                    )
+                }));
+            }
         }
     }
 
@@ -1326,6 +1347,7 @@ mod tests {
 
             TerminalView::handle_wheel_scrolled(
                 &mut state,
+                &TermMode::empty(),
                 ScrollDelta::Lines { y: 3.0, x: 0.0 }, // Scroll down 3 lines
                 &font.measure,
                 &mut commands,
@@ -1343,6 +1365,7 @@ mod tests {
 
             TerminalView::handle_wheel_scrolled(
                 &mut state,
+                &TermMode::empty(),
                 ScrollDelta::Lines { y: -2.0, x: 0.0 },
                 &font.measure,
                 &mut commands,
@@ -1360,6 +1383,7 @@ mod tests {
 
             TerminalView::handle_wheel_scrolled(
                 &mut state,
+                &TermMode::empty(),
                 ScrollDelta::Pixels { y: 45.0, x: 0.0 },
                 &font.measure,
                 &mut commands,
@@ -1378,6 +1402,7 @@ mod tests {
 
             TerminalView::handle_wheel_scrolled(
                 &mut state,
+                &TermMode::empty(),
                 ScrollDelta::Pixels { y: -60.0, x: 0.0 },
                 &font.measure,
                 &mut commands,
@@ -1386,6 +1411,27 @@ mod tests {
             assert_eq!(commands.len(), 1);
             assert!(matches!(commands[0], Command::Scroll(-3)));
             assert_eq!(state.scroll_pixels, -5.4000034);
+        }
+
+        #[test]
+        fn scroll_reports_wheel_presses_in_mouse_mode() {
+            let mut state = TerminalViewState::new(0);
+            let font = TermFont::new(FontSettings::default());
+            let mut commands = Vec::new();
+
+            TerminalView::handle_wheel_scrolled(
+                &mut state,
+                &(TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE),
+                ScrollDelta::Lines { y: -2.0, x: 0.0 },
+                &font.measure,
+                &mut commands,
+            );
+
+            assert_eq!(commands.len(), 2);
+            assert!(commands.iter().all(|c| matches!(
+                c,
+                Command::MouseReport(MouseButton::ScrollDown, _, _, true)
+            )));
         }
     }
 }
