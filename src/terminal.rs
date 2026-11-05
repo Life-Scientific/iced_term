@@ -61,6 +61,12 @@ impl Terminal {
         })
     }
 
+    /// The path of the picture under the pointer, when one is. The terminal underlines it and
+    /// leaves it unopened, so the program holding the terminal can show it the way it wants to.
+    pub fn hovered_image(&self) -> Option<&str> {
+        self.backend.hovered_image()
+    }
+
     pub fn widget_id(&self) -> &iced::widget::Id {
         &self.widget_id
     }

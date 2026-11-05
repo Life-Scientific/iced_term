@@ -24,6 +24,11 @@ use std::ops::{Index, RangeInclusive};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+// A path to a picture, so a shot an agent writes is a link to it. Anchored on the extension and
+// stopped by whitespace, a quote or a bracket, so it reads a path out of a sentence of output.
+const IMAGE_REGEX: &str =
+    r#"[^\u{0000}-\u{001F}\u{007F}-\u{009F}\u{2500}-\u{259F}<>"'`\s(){}\[\],]+\.([pP][nN][gG]|[jJ][pP][eE]?[gG]|[wW][eE][bB][pP]|[gG][iI][fF])"#;
+
 const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}\u{2500}-\u{259F}<>"\s{-}\^⟨⟩`]+"#;
 
 #[derive(Debug, Clone)]
@@ -139,7 +144,9 @@ pub struct Backend {
     notifier: Notifier,
     last_content: RenderableContent,
     pub(crate) url_regex: RegexSearch,
+    pub(crate) image_regex: RegexSearch,
     hovered_uri: Option<String>,
+    hovered_image: Option<String>,
 }
 
 impl Backend {
@@ -189,7 +196,9 @@ impl Backend {
             notifier,
             last_content: initial_content,
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
+            image_regex: RegexSearch::new(IMAGE_REGEX).expect("invalid image regexp"),
             hovered_uri: None,
+            hovered_image: None,
         })
     }
 
@@ -260,12 +269,26 @@ impl Backend {
                         (range, None)
                     },
                 };
+                // A picture's path is a link too, but its own program opens it rather than the
+                // Finder, so it is kept apart from a URL.
+                let image = match (&range, &uri) {
+                    (None, None) => self
+                        .regex_match_at(terminal, point, &mut self.image_regex.clone())
+                        .map(|range| (text_of(terminal, &range), range)),
+                    _ => None,
+                };
+                let (image, range) = match image {
+                    Some((text, range)) => (Some(text), Some(range)),
+                    None => (None, range),
+                };
                 self.last_content.hovered_hyperlink = range;
                 self.hovered_uri = uri;
+                self.hovered_image = image;
             },
             LinkAction::Clear => {
                 self.last_content.hovered_hyperlink = None;
                 self.hovered_uri = None;
+                self.hovered_image = None;
             },
             LinkAction::Open => {
                 self.open_link();
@@ -273,7 +296,14 @@ impl Backend {
         };
     }
 
+    pub fn hovered_image(&self) -> Option<&str> {
+        self.hovered_image.as_deref()
+    }
+
     fn open_link(&self) {
+        if self.hovered_image.is_some() {
+            return;
+        }
         if let Some(uri) = &self.hovered_uri {
             let _ = open::that(uri);
         } else if let Some(range) = &self.last_content.hovered_hyperlink {
@@ -636,6 +666,22 @@ fn visible_regex_match_iter<'a>(
         .take_while(move |rm| rm.start().line <= viewport_end)
 }
 
+fn text_of(
+    terminal: &Term<EventProxy>,
+    range: &RangeInclusive<Point>,
+) -> String {
+    let grid = terminal.grid();
+    let (start, end) = (range.start(), range.end());
+    let mut text = String::from(grid.index(*start).c);
+    for indexed in grid.iter_from(*start) {
+        text.push(indexed.c);
+        if indexed.point == *end {
+            break;
+        }
+    }
+    text
+}
+
 pub struct RenderableContent {
     pub grid: Grid<Cell>,
     pub hovered_hyperlink: Option<RangeInclusive<Point>>,
@@ -724,5 +770,18 @@ mod link_tests {
     fn osc8_links_open_their_target() {
         let t = term(b"go \x1b]8;;https://github.com/o/r/pull/12\x1b\\#12\x1b]8;;\x1b\\.");
         assert_eq!(url(&t, 4), "https://github.com/o/r/pull/12");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // alacritty's engine accepts the pattern or panics when a terminal is made, so a bad one
+    // would take every terminal down rather than simply failing to match.
+    #[test]
+    fn image_regex_compiles() {
+        assert!(RegexSearch::new(IMAGE_REGEX).is_ok());
+        assert!(RegexSearch::new(URL_REGEX).is_ok());
     }
 }
